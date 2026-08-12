@@ -39,6 +39,7 @@ const vueDiagnosticsByUri = new Map();
 const tsDiagnosticsByUri = new Map();
 const SERVER_REQUEST_TIMEOUT_MS = 15000;
 const DIAGNOSTICS_CACHE_TTL_MS = 5000;
+const TSSERVER_NO_CONTENT_MESSAGE = "No content available.";
 const TS_COMPLETION_DATA_KEY = "__novaVueTsCompletion";
 const NOVA_IDENTIFIER_TRIGGER_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$-";
 const traceLspEnabled = args.traceLsp === "true" || process.env.VUE_LSP_PROXY_TRACE_LSP === "1";
@@ -485,18 +486,33 @@ async function tryHandleLanguageFeature(message) {
         writeClient({ jsonrpc: "2.0", id: message.id, result: emptyCompletionList() });
         return true;
       }
+      const requestVueCompletion = fallbackToVueLanguageServerEnabled
+        && shouldRequestVueCompletion(file, message.params?.position, message.params?.context);
+      let typescriptError = null;
       const [typescriptResult, vueResult] = await Promise.all([
         typescriptServiceEnabled
-          ? tsCompletion(file, message.params?.position, message.params?.context).catch(() => emptyCompletionList())
+          ? tsCompletion(file, message.params?.position, message.params?.context).catch((error) => {
+            typescriptError = error;
+            return emptyCompletionList();
+          })
           : Promise.resolve(emptyCompletionList()),
-        fallbackToVueLanguageServerEnabled
-          && shouldRequestVueCompletion(file, message.params?.position, message.params?.context)
+        requestVueCompletion
           ? requestVue("textDocument/completion", normalizeCompletionParams(message.params)).catch((error) => {
             process.stderr.write(`[Vue LSP proxy] Vue completion failed: ${String(error?.message || error)}\n`);
             return emptyCompletionList();
           })
           : Promise.resolve(emptyCompletionList())
       ]);
+      if (typescriptError) {
+        process.stderr.write(`[Vue LSP proxy] TypeScript completion failed: ${String(typescriptError?.message || typescriptError)}\n`);
+      }
+      if (
+        fallbackToVueLanguageServerEnabled
+        && !requestVueCompletion
+        && (typescriptError || typescriptResult === null)
+      ) {
+        return false;
+      }
       writeClient({
         jsonrpc: "2.0",
         id: message.id,
@@ -518,9 +534,17 @@ async function tryHandleLanguageFeature(message) {
       }
       try {
         const result = await tsSignatureHelp(file, message.params?.position, message.params?.context);
-        writeClient({ jsonrpc: "2.0", id: message.id, result });
+        if (result) {
+          writeClient({ jsonrpc: "2.0", id: message.id, result });
+          return true;
+        }
+        if (vueSignatureHelpProvider && fallbackToVueLanguageServerEnabled) {
+          return false;
+        }
+        writeClient({ jsonrpc: "2.0", id: message.id, result: null });
         return true;
-      } catch {
+      } catch (error) {
+        process.stderr.write(`[Vue LSP proxy] TypeScript signature help failed: ${String(error?.message || error)}\n`);
         if (vueSignatureHelpProvider && fallbackToVueLanguageServerEnabled) {
           return false;
         }
@@ -793,7 +817,7 @@ async function tsCompletion(file, position, context) {
   }
   const result = unwrapTsserverResponse(await requestTsserver("completionInfo", requestArgs));
   if (!result || !Array.isArray(result.entries)) {
-    return emptyCompletionList();
+    return null;
   }
   return {
     isIncomplete: result.isIncomplete === true,
@@ -1793,6 +1817,10 @@ function handleTsserverMessage(message) {
   pendingTsserver.delete(message.request_seq);
   clearTimeout(pending.timer);
   if (message.success === false) {
+    if (message.message === TSSERVER_NO_CONTENT_MESSAGE) {
+      pending.resolve({ ...message, body: null });
+      return;
+    }
     pending.reject(new Error(message.message || `tsserver request failed: ${message.command}`));
     return;
   }

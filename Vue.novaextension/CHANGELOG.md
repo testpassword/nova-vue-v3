@@ -11,6 +11,8 @@
 - Fixed TypeScript bridge status reporting and cleaned up stopped clients so the language server can restart reliably.
 - Removed the unsupported custom handler for the core `workspace/configuration` LSP request.
 
+**Contribution:** Nova 14 compatibility update by [Artemii Kulbako (@testpassword)](https://github.com/testpassword) in [#1](https://github.com/vp1100/nova-vue-v3/pull/1).
+
 ## 0.1.4
 
 - Removed clipboard permissions by dropping the debug-info and LSP-capabilities copy commands.
